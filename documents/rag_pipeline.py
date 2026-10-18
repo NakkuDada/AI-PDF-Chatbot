@@ -115,10 +115,18 @@ def generate_answer_ollama(question, retrieved_chunks):
             "Ollama returned an invalid JSON response."
         ) from exc
 
-from documents.vector_store import (
-    index_document,
-    retrieve_chunks,
-)
+
+try:
+    from .vector_store import (
+        index_document,
+        retrieve_chunks,
+    )
+except ImportError:
+    from vector_store import (
+        index_document,
+        retrieve_chunks,
+    )
+
 
 
 def get_groq_settings():
