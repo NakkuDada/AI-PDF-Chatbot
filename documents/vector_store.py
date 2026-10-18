@@ -1,36 +1,33 @@
+from pathlib import Path
 
 import chromadb
 from sentence_transformers import SentenceTransformer
 
-# Load the model that converts text into embeddings.
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+CHROMA_PATH = PROJECT_ROOT / "chroma_db"
+
 embedding_model = SentenceTransformer(
     "sentence-transformers/all-MiniLM-L6-v2"
 )
 
-# Create a persistent vector database.
-# Run Streamlit from the main project folder.
 client = chromadb.PersistentClient(
-    path="./chroma_db"
+    path=str(CHROMA_PATH)
 )
 
 collection = client.get_or_create_collection(
-    name="pdf_chunks"
+    name="pdf_chunks",
+    metadata={"hnsw:space": "cosine"}
 )
 
 
 def index_document(document_id, chunks):
-    """Save PDF text chunks and their embeddings."""
-
     if not chunks:
-        raise ValueError("No PDF chunks were provided.")
+        raise ValueError("No text chunks were created.")
 
-    # Remove old entries for this document before re-indexing.
-    existing = collection.get(
+    # Replace any existing chunks for this document.
+    collection.delete(
         where={"document_id": document_id}
     )
-
-    if existing["ids"]:
-        collection.delete(ids=existing["ids"])
 
     texts = [chunk["text"] for chunk in chunks]
 
@@ -39,32 +36,24 @@ def index_document(document_id, chunks):
         normalize_embeddings=True
     ).tolist()
 
-    ids = [
-        f"{document_id}_{i}"
-        for i in range(len(chunks))
-    ]
-
-    metadatas = [
-        {
-            "document_id": document_id,
-            "page": int(chunk["page"])
-        }
-        for chunk in chunks
-    ]
-
     collection.add(
-        ids=ids,
+        ids=[
+            f"{document_id}_{i}"
+            for i in range(len(chunks))
+        ],
         documents=texts,
         embeddings=embeddings,
-        metadatas=metadatas
+        metadatas=[
+            {
+                "document_id": document_id,
+                "page": chunk["page"]
+            }
+            for chunk in chunks
+        ]
     )
-
-    return len(chunks)
 
 
 def retrieve_chunks(document_id, question, top_k=4):
-    """Search the vector database for relevant PDF passages."""
-
     query_embedding = embedding_model.encode(
         [question],
         normalize_embeddings=True
@@ -73,38 +62,17 @@ def retrieve_chunks(document_id, question, top_k=4):
     results = collection.query(
         query_embeddings=query_embedding,
         n_results=top_k,
-        where={"document_id": document_id},
-        include=[
-            "documents",
-            "metadatas",
-            "distances"
-        ]
+        where={"document_id": document_id}
     )
 
     retrieved = []
 
-    if not results["ids"] or not results["ids"][0]:
-        return retrieved
-
-    for i, text in enumerate(results["documents"][0]):
-        metadata = results["metadatas"][0][i]
-
-        retrieved.append({
-            "text": text,
-            "page": metadata["page"],
-            "distance": results["distances"][0][i]
-        })
+    if results["documents"] and results["documents"][0]:
+        for i, content in enumerate(results["documents"][0]):
+            retrieved.append({
+                "text": content,
+                "page": results["metadatas"][0][i]["page"],
+                "distance": results["distances"][0][i]
+            })
 
     return retrieved
-
-def search_vectors(query, n_results=5, document_id=None):
-    """Search the vector database using a query."""
-
-    if not document_id:
-        raise ValueError("document_id is required.")
-
-    return retrieve_chunks(
-        document_id=document_id,
-        question=query,
-        top_k=n_results
-    )

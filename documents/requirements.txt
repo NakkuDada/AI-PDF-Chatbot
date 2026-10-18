@@ -1,0 +1,15 @@
+streamlit
+pymupdf
+sentence-transformers
+chromadb
+openai
+python-dotenv
+numpy
+pytesseract
+pdfplumber
+pillow
+rank-bm25
+fastapi
+uvicorn
+python-multipart
+pytest

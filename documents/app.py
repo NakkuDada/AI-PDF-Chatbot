@@ -1,245 +1,311 @@
 
+import os
 import hashlib
-import pymupdf
+
 import streamlit as st
-from document_processor import extract_pdf_pages
 
 from rag_pipeline import (
+    validate_pdf,
     extract_pdf_pages,
     create_chunks,
-    index_document,
-    retrieve_chunks,
-    generate_answer
+    generate_answer,
+    generate_answer_ollama,
 )
 
-# STEP 1: Configure the Streamlit page
+from documents.vector_store import (
+    index_document,
+    retrieve_chunks,
+)
+
+
+# --------------------------------------------------
+# 1. Streamlit page configuration
+# --------------------------------------------------
+
 st.set_page_config(
     page_title="AI PDF Chatbot",
     page_icon="📚",
-    layout="wide"
+    layout="wide",
 )
 
 st.title("📚 AI PDF Chatbot")
-st.write(
-    "Upload a PDF and ask questions about its content. "
-    "Answers include retrieved source passages."
+st.caption(
+    "Upload a PDF, inspect extracted text, retrieve "
+    "relevant chunks, and ask questions."
 )
 
-# STEP 2: Initialize session state
+
+# --------------------------------------------------
+# 2. Session state
+# --------------------------------------------------
+
 if "documents" not in st.session_state:
     st.session_state.documents = {}
 
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = {}
 
-# STEP 3: Upload PDF files
+
+# --------------------------------------------------
+# 3. Upload and process PDFs
+# --------------------------------------------------
+
+st.header("1. Upload PDF")
+
 uploaded_files = st.file_uploader(
-    "Upload PDF documents",
+    "Choose one or more PDF files",
     type=["pdf"],
-    accept_multiple_files=True
+    accept_multiple_files=True,
+    key="pdf_uploader",
 )
 
-# STEP 4: Extract text and process uploaded PDFs
 if uploaded_files:
     for pdf_file in uploaded_files:
         pdf_bytes = pdf_file.getvalue()
+
+        if not pdf_bytes:
+            st.warning(f"{pdf_file.name} is empty.")
+            continue
 
         document_id = hashlib.sha256(
             pdf_bytes
         ).hexdigest()
 
-        if document_id not in st.session_state.documents:
-            try:
-                with st.spinner(
-                    f"Processing {pdf_file.name}..."
-                ):
-                    # Extract text using PyMuPDF
-                    doc = pymupdf.open(
-                        stream=pdf_bytes,
-                        filetype="pdf"
+        # Avoid processing the same PDF again this session.
+        if document_id in st.session_state.documents:
+            continue
+
+        try:
+            with st.spinner(f"Processing {pdf_file.name}..."):
+                validate_pdf(pdf_bytes)
+
+                pages = extract_pdf_pages(pdf_bytes)
+
+                if not pages:
+                    st.warning(
+                        f"No pages were extracted from "
+                        f"{pdf_file.name}."
                     )
+                    continue
 
-                    text = "\n".join(
-                        page.get_text()
-                        for page in doc
+                chunks = create_chunks(pages)
+
+                if not chunks:
+                    st.warning(
+                        f"No text chunks were created from "
+                        f"{pdf_file.name}. It may be scanned "
+                        "or contain no extractable text."
                     )
+                    continue
 
-                    st.write("PDF:", pdf_file.name)
-                    st.write(
-                        "Extracted characters:",
-                        len(text)
-                    )
+                index_document(document_id, chunks)
 
-                    with st.expander(
-                        f"Preview extracted text: {pdf_file.name}"
-                    ):
-                        if text.strip():
-                            st.text_area(
-                                "Extracted PDF text",
-                                text[:5000],
-                                height=300,
-                                key=f"text_preview_{document_id}"
-                            )
-                        else:
-                            st.warning(
-                                "No selectable text was found. "
-                                "This PDF may require OCR."
-                            )
+                st.session_state.documents[document_id] = {
+                    "name": pdf_file.name,
+                    "pages": pages,
+                    "chunks": chunks,
+                }
 
-                    doc.close()
-
-                    # Create chunks for searching
-                    pages = extract_pdf_pages(pdf_bytes)
-                    chunks = create_chunks(pages)
-
-                    # Index chunks in the search system
-                    index_document(document_id, chunks)
-
-                    # Store processed document
-                    st.session_state.documents[document_id] = {
-                        "name": pdf_file.name,
-                        "pages": len(pages),
-                        "chunks": chunks
-                    }
-
-                    st.session_state.chat_history[
-                        document_id
-                    ] = []
-
-            except Exception as exc:
-                st.error(
-                    f"Could not process {pdf_file.name}: {exc}"
+                st.session_state.chat_history.setdefault(
+                    document_id, []
                 )
 
-# STEP 5: Select a processed document
+            st.success(
+                f"{pdf_file.name} processed and indexed successfully."
+            )
+
+        except Exception as exc:
+            st.error(
+                f"Could not process {pdf_file.name}: "
+                f"{type(exc).__name__}: {exc}"
+            )
+
+
+# --------------------------------------------------
+# 4. Inspect extracted text and chunks
+# --------------------------------------------------
+
 if st.session_state.documents:
-    document_ids = list(
-        st.session_state.documents.keys()
-    )
+
+    st.header("2. PDF Extraction Debugging")
+
+    document_ids = list(st.session_state.documents.keys())
 
     selected_id = st.selectbox(
-        "Select a document",
+        "Select a processed PDF",
         options=document_ids,
         format_func=lambda doc_id: (
             st.session_state.documents[doc_id]["name"]
-        )
+        ),
     )
 
-    document = st.session_state.documents[selected_id]
+    selected_document = st.session_state.documents[selected_id]
+    pages = selected_document["pages"]
+    chunks = selected_document["chunks"]
 
-    st.success(
-        f"Ready: {document['name']} | "
-        f"{document['pages']} pages | "
-        f"{len(document['chunks'])} chunks"
+    st.write(f"**Pages extracted:** {len(pages)}")
+    st.write(f"**Chunks created:** {len(chunks)}")
+
+    with st.expander("View extracted PDF text"):
+        for page in pages:
+            st.markdown(f"**Page {page['page']}**")
+            page_text = page.get("text", "")
+
+            if page_text.strip():
+                st.text(page_text[:2000])
+            else:
+                st.warning(
+                    "No selectable text found on this page."
+                )
+
+    with st.expander("View first five text chunks"):
+        for i, chunk in enumerate(chunks[:5]):
+            st.markdown(
+                f"**Chunk {i + 1} | Page {chunk['page']}**"
+            )
+            st.text(chunk["text"][:1000])
+
+
+    # --------------------------------------------------
+    # 5. Ask questions and inspect retrieval
+    # --------------------------------------------------
+
+    st.header("3. Ask Questions")
+
+    st.caption("Ask a question about the selected PDF.")
+
+    history = st.session_state.chat_history.setdefault(
+        selected_id, []
     )
 
-    st.divider()
-    st.subheader("Ask questions")
-
-    # STEP 6: Display previous chat history
-    for message in st.session_state.chat_history[selected_id]:
+    for message in history:
         with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+            if message["role"] == "assistant" and message.get("error"):
+                st.error(message["content"])
+            else:
+                st.markdown(message["content"])
 
-            if message.get("sources"):
-                with st.expander("View source passages"):
-                    for source in message["sources"]:
-                        st.markdown(
-                            f"**PDF Page {source.get('page', 'Unknown')}**"
-                        )
-                        st.write(
-                            source.get("text", "No text available")
-                        )
+            if message["role"] == "assistant":
+                sources = message.get("sources", [])
 
-    # STEP 7: Ask questions about the selected PDF
+                if sources:
+                    with st.expander("Retrieved source chunks"):
+                        for i, chunk in enumerate(sources):
+                            st.markdown(
+                                f"**Result {i + 1} | "
+                                f"Page {chunk['page']}**"
+                            )
+                            st.text(chunk["text"][:1000])
+
     question = st.chat_input(
-        "What technical skills are mentioned in this PDF?"
+        "Ask something about your PDF..."
     )
 
-    if question:
-        st.session_state.chat_history[selected_id].append({
+    if question and question.strip():
+        question = question.strip()
+
+        history.append({
             "role": "user",
-            "content": question
+            "content": question,
         })
 
         with st.chat_message("user"):
             st.markdown(question)
 
-        with st.chat_message("assistant"):
-            try:
-                with st.spinner(
-                    "Searching the PDF and generating an answer..."
-                ):
-                    # STEP 7A: Retrieve PDF chunks
-                    sources = retrieve_chunks(
-                        selected_id,
-                        question,
-                        top_k=4
-                    )
-
-                    # STEP 7B: DEBUG - Show retrieved chunks
-                    st.subheader("Debug: Retrieved PDF Chunks")
-
-                    st.write(
-                        "DEBUG: Retrieved chunks:",
-                        len(sources)
-                    )
-
-                    for i, source in enumerate(sources):
-                        st.write(f"Chunk {i + 1}")
-
-                        st.write(
-                            "Page:",
-                            source.get("page", "Unknown")
-                        )
-
-                        st.write(
-                            "Text:",
-                            source.get("text", "No text")
-                        )
-
-                    # STEP 7C: Generate answer
-                    answer, sources = generate_answer(
-                        question,
-                        sources
-                    )
-
-                # STEP 7D: Display chatbot answer
-                st.subheader("Chatbot Answer")
-                st.markdown(answer)
-
-                # STEP 7E: Display source passages
-                if sources:
-                    with st.expander("View source passages"):
-                        for source in sources:
-                            st.markdown(
-                                f"**PDF Page {source.get('page', 'Unknown')}**"
-                            )
-                            st.write(
-                                source.get("text", "No text available")
-                            )
-                else:
-                    st.warning(
-                        "No source passages were retrieved. "
-                        "Check the debug output above."
-                    )
-
-                # STEP 7F: Save assistant response
-                st.session_state.chat_history[
-                    selected_id
-                ].append({
-                    "role": "assistant",
-                    "content": answer,
-                    "sources": sources
-                })
-
-            except Exception as exc:
-                st.error(
-                    f"Unable to generate an answer: {exc}"
+        try:
+            # F. Retrieve relevant chunks
+            with st.spinner("Retrieving relevant text..."):
+                retrieved_chunks = retrieve_chunks(
+                    selected_id,
+                    question,
+                    top_k=4,
                 )
 
+            # G. Show retrieval debugging
+            with st.expander(
+                f"Debug: Retrieved {len(retrieved_chunks)} chunks",
+                expanded=True,
+            ):
+                if retrieved_chunks:
+                    for i, chunk in enumerate(retrieved_chunks):
+                        st.markdown(
+                            f"**Result {i + 1} | "
+                            f"Page {chunk['page']}**"
+                        )
+                        st.text(chunk["text"][:1000])
+                else:
+                    st.warning(
+                        "No relevant chunks were retrieved."
+                    )
+
+            # H. Generate an answer using the selected provider
+            if not retrieved_chunks:
+                answer = (
+                    "I couldn't find relevant information "
+                    "in the uploaded PDF. Try a more specific "
+                    "question or check the extracted text."
+                )
+            else:
+                with st.spinner("Generating answer..."):
+                    provider = os.getenv(
+                        "AI_PROVIDER", "ollama"
+                    ).strip().lower()
+
+                    if provider == "ollama":
+                        answer = generate_answer_ollama(
+                            question,
+                            retrieved_chunks,
+                        )
+                    elif provider == "groq":
+                        answer = generate_answer(
+                            question,
+                            retrieved_chunks,
+                        )
+                    else:
+                        raise ValueError(
+                            "Unsupported AI_PROVIDER. "
+                            "Set it to 'ollama' or 'groq'."
+                        )
+
+            if not isinstance(answer, str) or not answer.strip():
+                answer = "No answer was generated."
+
+            # I. Display and save the answer
+            with st.chat_message("assistant"):
+                st.markdown(answer)
+
+                if retrieved_chunks:
+                    with st.expander("Answer sources"):
+                        for i, chunk in enumerate(retrieved_chunks):
+                            st.markdown(
+                                f"**Source {i + 1} | "
+                                f"Page {chunk['page']}**"
+                            )
+                            st.text(chunk["text"][:1000])
+
+            history.append({
+                "role": "assistant",
+                "content": answer,
+                "sources": retrieved_chunks,
+            })
+
+        except Exception as exc:
+            error_message = (
+                f"Answer generation failed "
+                f"({type(exc).__name__}): {exc}"
+            )
+
+            with st.chat_message("assistant"):
+                st.error(error_message)
+
+            history.append({
+                "role": "assistant",
+                "content": error_message,
+                "sources": [],
+                "error": True,
+            })
+
 else:
-    st.info("Upload a PDF to start chatting.")
-
-
-    
+    st.info(
+        "Upload a valid, text-based PDF to begin testing."
+    )
