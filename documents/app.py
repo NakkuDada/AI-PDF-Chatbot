@@ -1,7 +1,6 @@
 
 import os
 import hashlib
-
 import streamlit as st
 
 from rag_pipeline import (
@@ -12,10 +11,12 @@ from rag_pipeline import (
     generate_answer_ollama,
 )
 
-from documents.vector_store import (
+from vector_store import (
     index_document,
     retrieve_chunks,
 )
+
+
 
 
 # --------------------------------------------------
